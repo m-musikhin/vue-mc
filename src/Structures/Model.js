@@ -25,6 +25,7 @@ const RESERVED = _.invert([
     'memoized',
     'models',
     'saving',
+    'fetchChanged'
 ]);
 
 /**
@@ -257,6 +258,20 @@ class Model extends Base {
             // Whether this model should use mutated values for the attributes
             // in "save" request. This will not mutate the active state.
             mutateBeforeSave: true,
+
+            // Whether this model should update values for each attribute
+            // in "fetch" request  if the attribute has been modified relative 
+            // to the previous fetch and not set locally changed attrubute
+            // but always apply to saved attribute.
+            // This is more useful for a model updated in form and fetched 
+            // in parallel by setInterval
+            smartFetch: false,
+
+            // Used with smartFetch, if updateChanged is true, the current 
+            // attribute will be updated to the server value, 
+            // even if the value is changed locally, 
+            // but only if the value is changed on the server
+            updateChanged: false
         });
     }
 
@@ -347,6 +362,7 @@ class Model extends Base {
         Vue.set(this, 'saving',   false);
         Vue.set(this, 'deleting', false);
         Vue.set(this, 'fatal',    false);
+        Vue.set(this, 'fetchChanged',  false);
     }
 
     /**
@@ -360,8 +376,20 @@ class Model extends Base {
     assign(attributes) {
         this.set(_.defaults({}, attributes, _.cloneDeep(this.defaults())));
         this.sync();
+        Vue.set(this, 'fetchChanged',  true);
     }
 
+    /**
+     * Assigns all data of a given model to model attributes and reference 
+     * information (saved attributes) in accordance with smart policy.
+     *
+     * @param {Object} attributes
+     */
+    assignSmart(attributes) {
+        _.each(attributes, (value, key) => {
+            this.apply(key, value);
+        });
+    }
     /**
      * Resets all attributes back to their reference values (source of truth).
      * A good use case for this is when form fields are bound directly to the
@@ -528,6 +556,54 @@ class Model extends Base {
         }
 
         return value;
+    }
+
+    /**
+     * Apply  the references attributes to the current attributes. This is usually
+     * for fetch with smart update record
+     *
+     * @param {string} attribute
+     */
+    apply(attribute, value) {
+
+        let defined = this.has(attribute);
+
+        // Only register the pass-through property if it's not already set up.
+        // If it already exists on the instance, we know it has been.
+        if ( ! defined) {
+            this.registerAttribute(attribute);
+            Vue.set(this, 'fetchChanged',  true);
+        }
+
+        // Run the attribute's mutations if required to do so on change.
+        if (this.getOption('mutateOnChange')) {
+            value = this.mutated(attribute, value);
+        }
+
+        if ( _.isEqual(this.get(attribute), this.saved(attribute) )) {
+            if ( ! _.isEqual(value, this.saved(attribute) )) {
+                // console.log('== <> ' + JSON.stringify(value) + ' === ' + JSON.stringify(this.saved(attribute)) + ' === ' + JSON.stringify(this.get(attribute)))
+                Vue.set(this, 'fetchChanged',  true);
+                this.set(attribute, value);
+                this.sync(attribute);
+            }
+        } else {
+            if ( ! _.isEqual(value, this.saved(attribute) )) {
+                // console.log('<> <> ' + JSON.stringify(value) + ' === ' + JSON.stringify(this.saved(attribute)) + ' === ' + JSON.stringify(this.get(attribute)))
+                Vue.set(this, 'fetchChanged',  true);
+                if (this.getOption('mutateBeforeSync')) {
+                    let mutated = this.mutated(attribute, value);
+                    Vue.set(this._reference, attribute, mutated);
+                } else {
+                    Vue.set(this._reference, attribute, value);
+                }
+                if (this.getOption('updateChanged')) {
+                    this.set(attribute, value);
+                }
+            }
+        }
+        this.emit('apply', {attribute, value});
+
     }
 
     /**
@@ -728,7 +804,14 @@ class Model extends Base {
             throw new ResponseError("No data in fetch response", response);
         }
 
-        this.assign(attributes);
+        Vue.set(this, 'fetchChanged',  false);
+        if (!this.getOption('smartFetch')) {
+            // Assing also used in save, assignSmart only on fetch
+            this.assign(attributes);
+        } else {
+            this.assignSmart(attributes);
+        }
+        
 
         Vue.set(this, 'fatal',   false);
         Vue.set(this, 'loading', false);
